@@ -1,0 +1,158 @@
+---
+title: "Gender Classification Model"
+author: "Adeniran Emmanuel"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(tidyverse)
+library(tidymodels)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE,
+                      cache.lazy = FALSE, cache = TRUE,
+                      dpi = 100,fig.width = 15,
+                      fig.height = 6)
+```
+
+```{r Loading the Dataset}
+gender <- read_csv("C:/Users/LOLADE/Desktop/Data Science Project/TidyModels/Tidymodels_in_R/Machine Learning Dataset/gender_classification_v7.csv")
+
+head(gender)
+```
+
+
+```{r}
+gender <- gender |> 
+  mutate_if(is.character, factor)
+```
+
+```{r Spending Data Budget}
+set.seed(123)
+index <- initial_split(gender,strata = gender)
+
+gender_train <- training(index)
+gender_test <- testing(index)
+
+gender_folds <- vfold_cv(gender_train, strata =  gender)
+```
+
+
+
+```{r Hyperparameter Tuning}
+xgb_spec <- 
+  boost_tree(
+    min_n = tune(),learn_rate = tune(),
+    mtry = tune(),tree_depth = tune(),
+    trees = 1000,loss_reduction = tune(),
+    sample_size = tune()
+  ) |> 
+  set_engine("xgboost") |> 
+  set_mode("classification")
+
+```
+
+
+```{r xgboost Grid}
+xgb_grid <- grid_latin_hypercube(
+  tree_depth(),min_n(),
+  loss_reduction(),sample_size = sample_prop(),
+  finalize(mtry(),gender_train),learn_rate(),
+  size = 20
+)
+```
+
+```{r Workflow}
+xgb_wf <- workflow() |> 
+  add_formula(gender~.) |> 
+  add_model(xgb_spec)
+```
+
+
+```{r}
+set.seed(234)
+doParallel::registerDoParallel()
+
+xgb_res <- tune_grid(
+  xgb_wf, resamples = gender_folds,
+  grid = xgb_grid,control = control_grid(save_pred = TRUE)
+)
+```
+# Evaluating Model
+
+```{r}
+xgb_res |> 
+  collect_metrics() |> 
+  filter(.metric == "roc_auc") |> 
+  select(mean,mtry:sample_size) |> 
+  pivot_longer(
+    mtry:sample_size, names_to = "Parameter",
+    values_to = "Value"
+  ) |> 
+  ggplot(aes(Value, mean, colour = Parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~Parameter, scales = "free_x")
+
+```
+
+
+```{r}
+show_best(xgb_res, metric = "roc_auc")
+
+best_auc <- select_best(xgb_res, metric = "roc_auc")
+
+final_xgb <-  finalize_workflow(xgb_wf, best_auc)
+```
+
+
+
+```{r}
+library(vip)
+
+final_xgb |> 
+  fit(data = gender_train) |> 
+  extract_fit_parsnip() |> 
+  vip(geom = "point")
+
+```
+
+```{r}
+final_res  <- last_fit(final_xgb, index)
+final_res |> 
+  collect_predictions()
+```
+
+```{r}
+library(vetiver)
+library(plumber)
+library(pins)
+
+v <- extract_workflow(final_res) |> 
+  vetiver_model("Gendder-Prediction-xgb")
+
+pr() |> 
+  vetiver_api(v) |> 
+  pr_run()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
