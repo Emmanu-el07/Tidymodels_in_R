@@ -1,0 +1,168 @@
+---
+title: "Diabetes Prediction"
+author: "Adeniran Emmanuel"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(
+	fig.height = 6,
+	fig.width = 16,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	cache.lazy = FALSE,
+	dpi = 180,
+	include = FALSE
+)
+library(tidyverse)
+library(tidymodels)
+library(vetiver)
+library(plumber)
+library(vip)
+```
+
+```{r Loading the Dataset}
+diabetes <- read_csv("C:/Users/LOLADE/Desktop/Data Science Project/TidyModels/Tidymodels_in_R/Machine Learning Dataset/diabetes.csv")
+
+diabetes
+```
+
+# EDA
+
+```{r Exploratory Data Analysis}
+diabetes <- diabetes |> 
+  mutate(Outcome = if_else(Outcome == 0, "no","yes")) |> 
+  mutate_if(is.character,factor)
+
+diabetes |> 
+  pivot_longer(Pregnancies:Age, names_to = "Names", values_to = "Values") |> 
+  ggplot(aes(x = Names, y = Values, fill = Outcome)) +
+  geom_boxplot() +
+  facet_wrap(~Names, scales = "free")
+  
+diabetes |> 
+  filter(Insulin > 0 ) |> 
+  ggplot(aes(Insulin,Pregnancies, color = Outcome, label = Age)) +
+  geom_point(alpha = 0.7) +
+  geom_text(check_overlap = TRUE)
+```
+
+# Building Model
+```{r Spending Data Budget}
+set.seed(123)
+index <- diabetes |> 
+  initial_split(strata = Outcome)
+
+diabetes_train <- training(index)
+diabetes_test <- testing(index)
+
+diabetes_folds <- vfold_cv(strata = Outcome, data = diabetes_train)
+
+diabetes_folds
+```
+
+
+```{r Model Specification}
+xgb_spec <- boost_tree(
+  min_n = tune(),mtry = tune(),
+  learn_rate = tune(),loss_reduction = tune(),
+  sample_size = tune(), trees = 1e3, tree_depth = tune()
+) |> 
+  set_engine("xgboost") |> 
+  set_mode("classification")
+
+xgb_grid <- grid_latin_hypercube(
+  min_n(),learn_rate(),
+  tree_depth(),finalize(mtry(), diabetes_train),
+  sample_size = sample_prop(),loss_reduction(),
+  size = 20
+)
+
+xgb_wf <- workflow() |> 
+  add_formula(Outcome ~ .) |> 
+  add_model(xgb_spec)
+```
+
+
+```{r Building the Model}
+set.seed(234)
+doParallel::registerDoParallel()
+
+xgb_res <- tune_grid(
+  xgb_wf, resamples = diabetes_folds,
+  grid = xgb_grid, control = control_grid(save_pred = TRUE)
+)
+
+
+```
+
+
+```{r Model Evaluation}
+
+xgb_res |> 
+  collect_metrics() |> 
+  filter(.metric == "roc_auc") |> 
+  select(mean, mtry:sample_size) |> 
+  pivot_longer(mtry:sample_size, names_to = "Names", values_to = "Values") |> 
+  ggplot(aes(Values,mean, color = Names)) +
+  geom_point(alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(~Names, scales = "free")
+
+autoplot(xgb_res)
+
+xgb_res |> 
+  show_best(metric = "roc_auc")
+
+xgb_final <- xgb_wf |> 
+  finalize_workflow(select_best(xgb_res,metric = "roc_auc")) |> 
+  last_fit(index)
+  
+#Variable Importance
+xgb_final |> 
+  extract_workflow() |> 
+  extract_fit_parsnip() |> 
+  vip(geom = "point")
+
+#Confusion Matrix
+xgb_final |> 
+  collect_predictions() |> 
+  conf_mat(Outcome,.pred_class) |> 
+  autoplot()
+
+# Ploting roc_curve on the Model Predictions
+xgb_final |> 
+  collect_predictions() |> 
+  roc_curve(Outcome,.pred_no) |> 
+  autoplot()
+
+#Saving the Model
+
+xgb_final |> 
+  extract_workflow() |> 
+  write_rds("Diabetes-model-rds")
+```
+
+```{r Deployable Model}
+v <- xgb_final |> 
+  extract_workflow() |> 
+  vetiver_model("Diabetes-Prediction-xgb")
+```
+
+```{r}
+pr() |> 
+  vetiver_api(v) |> 
+  pr_run()
+```
+
+
+
+
+
+
+
+
+
+
