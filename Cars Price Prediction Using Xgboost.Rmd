@@ -1,0 +1,203 @@
+---
+title: "Car Price Prediction"
+author: "Adeniran Emmanuel"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, dpi =  100,
+                      fig.width = 16, fig.height = 6, cache.lazy = FALSE,
+                      cache = TRUE, message = FALSE)
+```
+
+
+```{r Loading Necessary Packages}
+# Loading Necesary Packages
+library(tidyverse)
+library(tidymodels)
+library(vip)
+library(vetiver)
+library(pins) 
+library(plumber)
+```
+
+```{r}
+cars <- read_csv("C:/Users/LOLADE/Desktop/Data Science Project/TidyModels/Tidymodels_in_R/Machine Learning Dataset/cars_clus.csv")
+
+cars
+```
+
+# Exploratory Data Analysis
+```{r}
+#1. Partition is a Useless variable cos it has only one Observation 
+#2. There is a relationship between Price and Resale
+#3. Porsche has the Jighest meam Price
+
+glimpse(cars)
+
+cars |> 
+  pivot_longer(c(resale,engine_s:mpg), names_to = "Variables", values_to = "Values") |> 
+  ggplot(aes(x = price, Values, color = Variables)) +
+  geom_point(show.legend = FALSE, alpha = 0.7) +
+  facet_wrap(~Variables, scales = "free_y")
+
+
+cars |> 
+  mutate_if(is.character, factor)|> 
+  ggplot(aes(fct_reorder(manufact, price), price, fill = manufact, group = manufact)) +
+  geom_boxplot(show.legend = FALSE, alpha = 0.7)
+
+
+cars |> 
+  ggplot(aes(price, resale, label = model, color = model)) +
+  geom_point(show.legend = FALSE) +
+  geom_text(check_overlap = TRUE, show.legend = FALSE)
+
+```
+
+
+### Model
+
+```{r Spending Data Budget}
+set.seed(123)
+
+# Spliting the Dataset
+index <- cars |> 
+  select(-partition) |> 
+  initial_split(strata = price)
+
+cars_train <- training(index) 
+cars_test <- testing(index)
+
+# Cross Validation Set
+
+cars_folds <- vfold_cv(cars_train, strata = price)
+
+cars_folds
+```
+
+
+```{r Model Specification}
+xgb_spec <- boost_tree(
+  min_n = tune(),learn_rate = tune(),mtry = tune(),
+  sample_size = tune(), trees = 1e3,loss_reduction = tune(),
+  tree_depth = tune()
+) |> 
+  set_engine("xgboost") |> 
+  set_mode("regression")
+
+xgb_grid <- grid_latin_hypercube(
+  tree_depth(),min_n(),
+  loss_reduction(),learn_rate(),
+  sample_size = sample_prop(),finalize(mtry(),cars_train),
+  size = 20
+)
+
+xgb_wf <- workflow() |> 
+  add_formula(price ~.) |> 
+  add_model(xgb_spec)
+```
+
+
+```{r Building the Model}
+set.seed(234)
+doParallel::registerDoParallel()
+
+cars_res <- tune_grid(
+  xgb_wf,
+  resamples = cars_folds,
+  control = control_grid(save_pred = TRUE),
+  grid = xgb_grid
+)
+```
+
+
+
+```{r Model Evaluation}
+autoplot(cars_res)
+
+
+cars_res |> 
+  collect_metrics() |> 
+  select(mean,mtry:sample_size) |> 
+  pivot_longer(mtry:sample_size, names_to = "Parameter",values_to = "Values") |> 
+  ggplot(aes(Values, mean, color = Parameter)) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~Parameter, scales = "free_y")
+
+cars_res |> 
+  show_best(metric = "rmse") 
+
+```
+
+```{r Finalizing Model}
+best_rmse <- cars_res |> 
+  select_best(metric = "rmse")
+
+
+cars_pred <- xgb_wf |> 
+  finalize_workflow(best_rmse) |> 
+  last_fit(index)
+
+cars_pred |> 
+  collect_metrics()
+
+cars_pred |> 
+  extract_workflow() |> 
+  extract_fit_parsnip() |> 
+  vip(num_features = 10, geom = "point")
+
+cars_pred |> 
+  collect_predictions() |> 
+  ggplot(aes(.pred)) +
+  geom_histogram()
+```
+
+```{r Creating a deployable Model}
+v <- cars_pred |> 
+  extract_workflow() |> 
+  vetiver_model("Cars-Price-Prediction-xgb")
+
+pr() |> 
+  vetiver_api(v) |> 
+  pr_run()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
